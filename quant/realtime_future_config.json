@@ -1,0 +1,44 @@
+{
+    "description": "实时期货交易策略配置",
+    "tushare_token": "9d8b0b27c0d38d3274582aae188836b0a8f90c657140a5f263001e59",
+    "contracts": [
+        {
+            "ts_code": "FG2605.ZCE",
+            "name": "玻璃2605",
+            "exchange": "CZCE"
+        }
+    ],
+    "time_periods": [
+        "1min"
+    ],
+    "strategies": [
+        {
+            "name": "三连K策略v3",
+            "module": "strategy_3consecutive_kline_v3",
+            "class": "ThreeConsecutiveKlineStrategy",
+            "params": {
+                "lookback_bars": 15,
+                "volume_multiplier": 3
+            }
+        }
+    ],
+    "trading": {
+        "default_volume": 10,
+        "margin_rate": 0.1,
+        "contract_multiplier": 50
+    },
+    "polling": {
+        "enabled": true,
+        "interval_seconds": 30
+    },
+    "market_hours": {
+        "session1_start": "09:00",
+        "session1_end": "10:15",
+        "session2_start": "10:30",
+        "session2_end": "11:30",
+        "session3_start": "13:30",
+        "session3_end": "15:00",
+        "session4_start": "21:00",
+        "session4_end": "23:00"
+    }
+}

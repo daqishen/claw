@@ -1,0 +1,7 @@
+{
+    "save_as_csv": true,
+    "frequency": "1MIN",
+    "data_dir": "/Users/qiyue/Desktop/test/claw/quant/data/futures",
+    "contracts_file": "/Users/qiyue/Desktop/test/claw/quant/main_contracts.csv",
+    "description": "期货实时分钟行情数据采集配置"
+}

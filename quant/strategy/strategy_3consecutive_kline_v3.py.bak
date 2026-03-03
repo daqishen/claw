@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+三连K线交易策略 v3 - 部分平仓策略
+
+策略逻辑：
+- 开仓手数 = 总资金 * 1% / 止损幅度
+- 1:1时平半仓，止损移到盈亏平衡点
+- 2:1时平剩余半仓
+"""
+
+import sys
+import os
+import pandas as pd
+import numpy as np
+
+sys.path.insert(0, '/Users/qiyue/Desktop/test/claw/quant/strategy')
+from future_base import FutureData
+
+
+CONTRACT_FILE = '/Users/qiyue/Desktop/test/claw/quant/data/history_futures/1min/FG2605_ZCE_1min.csv'
+CONTRACT_NAME = 'FG2605'
+OUTPUT_DIR = '/Users/qiyue/Desktop/test/claw/quant/res'
+
+
+class StrategyV3:
+    def __init__(self, data, initial_capital=1000000):
+        self.data = data
+        self.price_df = data.df.copy()
+        if 'trade_time' in self.price_df.columns:
+            self.price_df = self.price_df.sort_values('trade_time').reset_index(drop=True)
+            self.time_col = 'trade_time'
+        else:
+            self.price_df = self.price_df.sort_values('time').reset_index(drop=True)
+            self.time_col = 'time'
+
+        self.initial_capital = initial_capital
+        self.capital = initial_capital
+        self.positions = []
+        self.trades = []
+        self.signals = []
+
+    def is_bullish(self, df, i):
+        if i >= len(df):
+            return False
+        return df.iloc[i]['close'] > df.iloc[i]['open']
+
+    def is_bearish(self, df, i):
+        if i >= len(df):
+            return False
+        return df.iloc[i]['close'] < df.iloc[i]['open']
+
+    def check_breakout(self, df, i):
+        if i < 6:
+            return {'breakout': False, 'direction': None}
+
+        prev_5 = df.iloc[i-6:i-1]
+        curr = df.iloc[i]
+
+        if curr['vol'] <= prev_5['vol'].mean() * 3:
+            return {'breakout': False, 'direction': None}
+
+        if curr['low'] <= prev_5['low'].min():
+            return {'breakout': True, 'direction': 'up'}
+        if curr['high'] >= prev_5['high'].max():
+            return {'breakout': True, 'direction': 'down'}
+
+        return {'breakout': False, 'direction': None}
+
+    def open_position(self, direction, entry_price, stop_loss, open_time):
+        """开仓 - 每次最大亏损为总资金的1%"""
+        # 每次最大亏损金额 = 总资金 * 1%
+        max_loss = self.capital * 0.01
+
+        # 价格波动幅度
+        price_risk = abs(entry_price - stop_loss)
+
+        if price_risk > 0:
+            # 玻璃期货每手50吨，假设每吨1元，则每点=50元
+            # 手数 = 最大亏损 / (每点价值 * 风险点数)
+            multiplier = 50  # 每手50吨，每吨1元 = 50元/点
+            volume = int(max_loss / (price_risk * multiplier))
+            volume = max(1, volume)
+        else:
+            volume = 1
+
+        # 保证金 = 手数 * 价格 * 50 * 10%
+        margin = volume * entry_price * 50 * 0.1
+
+        # 确保不超过可用资金
+        if margin > self.capital * 0.5:  # 最多用一半资金
+            volume = int((self.capital * 0.5) / (entry_price * 50 * 0.1))
+            volume = max(1, volume)
+            margin = volume * entry_price * 50 * 0.1
+
+        # 计算止盈目标价
+        risk = abs(entry_price - stop_loss)
+        tp1_price = entry_price + risk * 1 if direction == 'long' else entry_price - risk * 1
+        tp2_price = entry_price + risk * 2 if direction == 'long' else entry_price - risk * 2
+
+        position = {
+            'direction': direction,
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
+            'original_stop': stop_loss,
+            'tp1_price': tp1_price,
+            'tp2_price': tp2_price,
+            'volume': volume,
+            'margin': margin,
+            'open_time': open_time,
+            'half_closed': False,
+            'status': 'open'
+        }
+
+        self.positions.append(position)
+        self.capital -= margin
+
+        return position
+
+    def close_position(self, idx, close_price, close_time, reason, volume=None, current_stop_loss=None):
+        """平仓"""
+        pos = self.positions[idx]
+        if pos['status'] != 'open':
+            return None
+
+        if volume is None:
+            volume = pos['volume']
+
+        volume = min(volume, pos['volume'])
+
+        if pos['direction'] == 'long':
+            profit = (close_price - pos['entry_price']) * volume
+        else:
+            profit = (pos['entry_price'] - close_price) * volume
+
+        margin_return = volume * pos['entry_price'] * 50 * 0.1
+        self.capital += margin_return + profit
+
+        # 使用实际止损，如果没传就用的持仓的止损
+        actual_stop = current_stop_loss if current_stop_loss is not None else pos.get('original_stop', pos.get('stop_loss'))
+
+        self.trades.append({
+            'direction': pos['direction'],
+            'open_price': pos['entry_price'],
+            'close_price': close_price,
+            'volume': volume,
+            'open_time': pos['open_time'],
+            'close_time': close_time,
+            'stop_loss': actual_stop,
+            'take_profit_1': pos.get('tp1_price'),
+            'take_profit_2': pos.get('tp2_price'),
+            'profit': profit,
+            'return_pct': profit / (pos['entry_price'] * volume * 50 * 0.1) * 100,
+            'reason': reason,
+            'status': 'closed'
+        })
+
+        pos['volume'] -= volume
+        if pos['volume'] <= 0:
+            pos['status'] = 'closed'
+
+        return profit
+
+    def run(self):
+        df = self.price_df.copy()
+
+        print(f"数据共 {len(df)} 条")
+
+        # 过滤时间
+        df['hour'] = df[self.time_col].apply(lambda x: int(str(x)[11:13]))
+        df['minute'] = df[self.time_col].apply(lambda x: int(str(x)[14:16]))
+        df = df[~((df['hour'] == 9) & (df['minute'] < 3))]
+
+        print(f"过滤后 {len(df)} 条")
+
+        for i in range(6, len(df)):
+            breakout_info = self.check_breakout(df, i-2)
+            if not breakout_info['breakout']:
+                continue
+
+            prev_bullish = self.is_bullish(df, i-1)
+            prev_bearish = self.is_bearish(df, i-1)
+            curr_bullish = self.is_bullish(df, i)
+            curr_bearish = self.is_bearish(df, i)
+
+            kline1 = df.iloc[i-2]
+            current_time = df.iloc[i][self.time_col]
+            current_price = df.iloc[i]['close']
+
+            # 禁止开仓时段
+            hour = int(str(current_time)[11:13])
+            minute = int(str(current_time)[14:16])
+            if hour == 9 and minute < 5:
+                continue
+            if hour == 13 and minute < 35:
+                continue
+            if hour == 21 and minute < 5:
+                continue
+
+            has_position = any(p['status'] == 'open' for p in self.positions)
+
+            # 开仓
+            new_signal = False
+            if not has_position:
+                if breakout_info['direction'] == 'up' and prev_bullish and curr_bullish:
+                    stop_loss = kline1['low']
+                    entry_price = df.iloc[i-1]['close']
+                    pos = self.open_position('long', entry_price, stop_loss, current_time)
+                    self.signals.append({'time': current_time, 'type': 'BUY', 'price': entry_price, 'stop_loss': stop_loss, 'volume': pos['volume']})
+                    new_signal = True
+
+                elif breakout_info['direction'] == 'up' and prev_bearish and curr_bearish:
+                    stop_loss = kline1['high']
+                    entry_price = df.iloc[i-1]['close']
+                    pos = self.open_position('short', entry_price, stop_loss, current_time)
+                    self.signals.append({'time': current_time, 'type': 'SELL', 'price': entry_price, 'stop_loss': stop_loss, 'volume': pos['volume']})
+                    new_signal = True
+
+                elif breakout_info['direction'] == 'down' and prev_bearish and curr_bearish:
+                    stop_loss = kline1['high']
+                    entry_price = df.iloc[i-1]['close']
+                    pos = self.open_position('short', entry_price, stop_loss, current_time)
+                    self.signals.append({'time': current_time, 'type': 'SELL', 'price': entry_price, 'stop_loss': stop_loss, 'volume': pos['volume']})
+                    new_signal = True
+
+                elif breakout_info['direction'] == 'down' and prev_bullish and curr_bullish:
+                    stop_loss = kline1['low']
+                    entry_price = df.iloc[i-1]['close']
+                    pos = self.open_position('long', entry_price, stop_loss, current_time)
+                    self.signals.append({'time': current_time, 'type': 'BUY', 'price': entry_price, 'stop_loss': stop_loss, 'volume': pos['volume']})
+                    new_signal = True
+
+            # 每根K线都检查持仓的止损/止盈
+            for idx, pos in enumerate(self.positions):
+                if pos['status'] != 'open':
+                    continue
+                
+                # 调试：打印14:39附近的所有持仓检查
+                if '14:3' in str(current_time) and '2026-02-02' in str(current_time):
+                    print(f"DEBUG: {current_time} | pos={pos['direction']} entry={pos['entry_price']} stop={pos['stop_loss']} half_closed={pos.get('half_closed')} current={current_price}")
+                
+                # 计算当前盈亏比
+                if pos['direction'] == 'long':
+                    profit = (current_price - pos['entry_price'])
+                    risk = pos['entry_price'] - pos['stop_loss']
+                else:
+                    profit = (pos['entry_price'] - current_price)
+                    risk = pos['stop_loss'] - pos['entry_price']
+                
+                if risk <= 0:
+                    rr = 0
+                else:
+                    rr = profit / risk
+                
+                # 1:1平半仓
+                if rr >= 1.0 and not pos.get('half_closed', False):
+                    half_vol = pos['volume'] // 2
+                    if half_vol > 0:
+                        self.close_position(idx, current_price, current_time, 'rr_1', half_vol, current_stop_loss=pos['stop_loss'])
+                        pos['half_closed'] = True
+                
+                # 2:1平全仓
+                elif rr >= 2.0:
+                    self.close_position(idx, current_price, current_time, 'rr_2', current_stop_loss=pos['stop_loss'])
+                
+                # 止损
+                elif (pos['direction'] == 'long' and current_price <= pos['stop_loss']) or \
+                     (pos['direction'] == 'short' and current_price >= pos['stop_loss']):
+                    print(f"止损触发: {current_time} | {pos['direction']} | 入={pos['entry_price']} 价格={current_price} 止损={pos['stop_loss']}")
+                    self.close_position(idx, current_price, current_time, 'stop_loss', current_stop_loss=pos['stop_loss'])
+
+        # 平最后持仓
+        if len(df) > 0:
+            last_time = df.iloc[-1][self.time_col]
+            last_price = df.iloc[-1]['close']
+            for idx, pos in enumerate(self.positions):
+                if pos['status'] == 'open':
+                    self.close_position(idx, last_price, last_time, 'end', current_stop_loss=pos['stop_loss'])
+
+        print("完成!")
+
+    def get_results(self):
+        trades_df = pd.DataFrame(self.trades)
+
+        if len(trades_df) == 0:
+            return {'total_trades': 0}
+
+        total_trades = len(trades_df)
+        wins = len(trades_df[trades_df['profit'] > 0])
+        losses = len(trades_df[trades_df['profit'] <= 0])
+        win_rate = wins / total_trades * 100
+
+        stop_loss_count = len(trades_df[trades_df['reason'] == 'stop_loss'])
+        rr_1_count = len(trades_df[trades_df['reason'] == 'rr_1'])
+        rr_2_count = len(trades_df[trades_df['reason'] == 'rr_2'])
+
+        total_profit = trades_df['profit'].sum()
+
+        return {
+            'total_trades': total_trades,
+            'wins': wins,
+            'losses': losses,
+            'win_rate': win_rate,
+            'stop_loss_count': stop_loss_count,
+            'rr_1_count': rr_1_count,
+            'rr_2_count': rr_2_count,
+            'total_profit': total_profit,
+            'final_capital': self.capital,
+            'initial_capital': self.initial_capital,
+            'return_pct': (self.capital - self.initial_capital) / self.initial_capital * 100
+        }
+
+    def save_results(self):
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+        signals_df = pd.DataFrame(self.signals)
+        if len(signals_df) > 0:
+            signals_df.to_csv(f'{OUTPUT_DIR}/{CONTRACT_NAME}_v3_signals.csv', index=False, encoding='utf-8-sig')
+
+        trades_df = pd.DataFrame(self.trades)
+        if len(trades_df) > 0:
+            trades_df.to_csv(f'{OUTPUT_DIR}/{CONTRACT_NAME}_v3_trades.csv', index=False, encoding='utf-8-sig')
+
+        results = self.get_results()
+        results_df = pd.DataFrame([results])
+        results_df.to_csv(f'{OUTPUT_DIR}/{CONTRACT_NAME}_v3_results.csv', index=False, encoding='utf-8-sig')
+
+        return results
+
+
+def main():
+    print("=" * 60)
+    print("三连K线策略 v3 - 部分平仓版")
+    print("=" * 60)
+
+    data = FutureData.from_csv(CONTRACT_FILE)
+    print(f"加载数据: {len(data.df)} 条")
+
+    strategy = StrategyV3(data, initial_capital=1000000)
+    strategy.run()
+
+    results = strategy.save_results()
+
+    print("\n" + "=" * 60)
+    print("回测结果")
+    print("=" * 60)
+    print(f"交易次数: {results['total_trades']}")
+    print(f"胜率: {results['win_rate']:.2f}%")
+    print(f"盈利次数: {results['wins']}")
+    print(f"亏损次数: {results['losses']}")
+    print(f"止损次数: {results['stop_loss_count']}")
+    print(f"1:1平半仓: {results['rr_1_count']}")
+    print(f"2:1平全仓: {results['rr_2_count']}")
+    print(f"总收益: {results['total_profit']}")
+    print(f"最终资金: {results['final_capital']}")
+    print("=" * 60)
+
+
+if __name__ == '__main__':
+    main()

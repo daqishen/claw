@@ -1,0 +1,8 @@
+{
+    "save_as_csv": true,
+    "frequencies": ["1min", "30min"],
+    "max_records": 8000,
+    "history_dir": "/Users/qiyue/Desktop/test/claw/quant/data/history_futures",
+    "contracts_file": "/Users/qiyue/Desktop/test/claw/quant/main_contracts.csv",
+    "description": "期货历史分钟行情数据采集配置"
+}
