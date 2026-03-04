@@ -75,6 +75,45 @@ def filter_active_contracts(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def get_main_contract_by_volume(pro, exchange, fut_code, active_contracts):
+    """
+    获取主力合约：6个月内到期 + 近3日成交量最大
+    """
+    from datetime import datetime, timedelta
+    
+    now = datetime.now()
+    current_date = now.strftime('%Y%m%d')
+    six_months_later = (now + timedelta(days=180)).strftime('%Y%m%d')
+    
+    # 筛选6个月内到期的合约
+    contracts = active_contracts[(active_contracts['exchange'] == exchange) &
+                                   (active_contracts['fut_code'] == fut_code) &
+                                   (active_contracts['delist_date'] >= current_date) &
+                                   (active_contracts['delist_date'] <= six_months_later)]
+    
+    if len(contracts) == 0:
+        return None
+    
+    # 获取每个合约的成交量
+    volume_data = []
+    for ts_code in contracts['ts_code']:
+        try:
+            df_daily = pro.fut_daily(ts_code=ts_code, start_date='20260301', end_date='20260304')
+            if df_daily is not None and len(df_daily) > 0:
+                total_vol = df_daily['vol'].sum()
+                volume_data.append({'ts_code': ts_code, 'vol': total_vol})
+        except:
+            pass
+    
+    if not volume_data:
+        # 如果没有成交量数据，返回最近到期的
+        return contracts.sort_values('delist_date').iloc[0]
+    
+    vol_df = pd.DataFrame(volume_data).sort_values('vol', ascending=False)
+    main_ts_code = vol_df.iloc[0]['ts_code']
+    return contracts[contracts['ts_code'] == main_ts_code].iloc[0]
+
+
 def main():
     print("=" * 60)
     print("开始获取期货可交易合约...")
@@ -109,31 +148,28 @@ def main():
         fg = fg.sort_values('ts_code')
         print(fg[['ts_code', 'name', 'delist_date']].to_string(index=False))
     
-    # 显示当前主力合约（选择最近到期的）
+    # 显示当前主力合约（6个月内到期 + 近3日成交量最大）
     print("\n" + "=" * 60)
-    print("推荐主力合约（最近到期）:")
+    print("推荐主力合约（6个月内到期 + 近3日成交量最大）:")
     print("=" * 60)
     
+    # 只计算玻璃、纯碱、螺纹钢、沪金等常用合约
+    main_codes = ['FG', 'SA', 'RB', 'AU', 'IF', 'IC', 'IH', 'IM', 'RU', 'TA', 'MA', 'PP', 'PVC', 'J', 'JM', 'I']
+    pro = tushare.pro_api(TOKEN)
+    
     main_contracts = []
-    for fut_code in active_df['fut_code'].unique():
-        contracts = active_df[active_df['fut_code'] == fut_code]
-        if len(contracts) > 0:
-            # 选择最近到期的
-            main_contract = contracts.sort_values('ts_code').iloc[0]
+    for fut_code in main_codes:
+        # 获取交易所代码
+        contract_sample = active_df[active_df['fut_code'] == fut_code]
+        if len(contract_sample) == 0:
+            continue
+        
+        exchange = contract_sample.iloc[0]['exchange']
+        main_contract = get_main_contract_by_volume(pro, exchange, fut_code, active_df)
+        
+        if main_contract is not None:
             main_contracts.append(main_contract.to_dict())
-    
-    main_df = pd.DataFrame(main_contracts)
-    main_df = main_df.sort_values(['exchange', 'fut_code'])
-    
-    main_df.to_csv(OUTPUT_FILE, index=False, encoding='utf-8-sig')
-    
-    print(f"\n主力合约数量: {len(main_df)}")
-    print(main_df[['exchange', 'fut_code', 'ts_code', 'name']].head(20).to_string(index=False))
-    
-    # 玻璃
-    fg_main = main_df[main_df['fut_code'] == 'FG']
-    if len(fg_main) > 0:
-        print(f"\n玻璃主力: {fg_main.iloc[0]['ts_code']}")
+            print(f"  {fut_code}: {main_contract['ts_code']}")
 
 
 if __name__ == '__main__':

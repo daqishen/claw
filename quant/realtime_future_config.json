@@ -6,6 +6,21 @@
             "ts_code": "FG2605.ZCE",
             "name": "玻璃2605",
             "exchange": "CZCE"
+        },
+        {
+            "ts_code": "SA2605.ZCE",
+            "name": "纯碱2605",
+            "exchange": "CZCE"
+        },
+        {
+            "ts_code": "RB2605.SHF",
+            "name": "螺纹钢2605",
+            "exchange": "SHFE"
+        },
+        {
+            "ts_code": "AU2604.SHF",
+            "name": "沪金2604",
+            "exchange": "SHFE"
         }
     ],
     "time_periods": [
