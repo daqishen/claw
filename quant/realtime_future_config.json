@@ -23,9 +23,9 @@
             "exchange": "SHFE"
         }
     ],
-    "time_periods": [
-        "1min"
-    ],
+    "time_frame": "1min",
+    "time_frame_options": ["1min", "5min", "15min", "30min", "60min"],
+    "data_dir": "/Users/qiyue/Desktop/test/claw/quant/data/history_futures",
     "strategies": [
         {
             "name": "三连K策略v3",

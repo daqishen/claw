@@ -33,7 +33,6 @@ from future_base import FutureData
 
 # 配置路径
 CONFIG_FILE = '/Users/qiyue/Desktop/test/claw/quant/realtime_future_config.json'
-DATA_DIR = '/Users/qiyue/Desktop/test/claw/quant/data/history_futures/1min'
 
 
 class RealtimeTrader:
@@ -42,6 +41,14 @@ class RealtimeTrader:
     def __init__(self, config_path: str, test_mode: bool = False):
         self.config = self.load_config(config_path)
         self.test_mode = test_mode
+        
+        # 获取配置的分钟级别
+        self.time_frame = self.config.get('time_frame', '5min')  # 默认5分钟
+        base_data_dir = self.config.get('data_dir', '/Users/qiyue/Desktop/test/claw/quant/data/history_futures')
+        self.data_dir = os.path.join(base_data_dir, self.time_frame)
+        
+        print(f"📊 使用时间周期: {self.time_frame}")
+        print(f"📁 数据目录: {self.data_dir}")
         
         # 设置 tushare token
         token = self.config.get('tushare_token', '')
@@ -53,6 +60,7 @@ class RealtimeTrader:
         
         # 缓存
         self.last_signal = {}  # 缓存上一次的信号，避免重复打印
+        self.reported_breakouts = set()  # 已提示的放量K集合，避免重复提示
         
         # 加载策略
         self.strategies = self.load_strategies()
@@ -95,44 +103,104 @@ class RealtimeTrader:
         
         return strategies
     
+    def resample_1min_to_target(self, df_1min: pd.DataFrame, target_frame: str) -> pd.DataFrame:
+        """
+        将1分钟K线合并成目标周期K线
+        
+        Args:
+            df_1min: 1分钟数据
+            target_frame: 目标周期 (5min, 15min, 30min, 60min)
+        
+        Returns:
+            合并后的数据
+        """
+        if df_1min is None or len(df_1min) == 0:
+            return pd.DataFrame()
+        
+        df = df_1min.copy()
+        
+        # 确保有时间列
+        if 'trade_time' in df.columns and 'time' not in df.columns:
+            df['time'] = df['trade_time']
+        
+        if 'time' not in df.columns:
+            return pd.DataFrame()
+        
+        # 解析时间并设置为索引
+        df['time'] = pd.to_datetime(df['time'])
+        df.set_index('time', inplace=True)
+        
+        # 根据目标周期重采样
+        # 提取周期数字
+        frame_minutes = int(target_frame.replace('min', ''))
+        
+        # 重采样
+        df_resampled = df[['open', 'high', 'low', 'close', 'vol']].resample(f'{frame_minutes}min').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'vol': 'sum'
+        })
+        
+        # 去除空值并重置索引
+        df_resampled = df_resampled.dropna()
+        df_resampled = df_resampled.reset_index()
+        df_resampled = df_resampled.rename(columns={'time': 'trade_time'})
+        
+        return df_resampled
+    
     def load_contract_data(self):
         """加载合约数据"""
         for contract in self.config.get('contracts', []):
             ts_code = contract['ts_code']
             name = contract.get('name', ts_code)
             
-            # 尝试读取实时数据
-            df = self.get_realtime_data(ts_code)
-            
-            if df is not None and len(df) > 0:
-                self.contract_data[ts_code] = {
-                    'data': df,
-                    'name': name,
-                    'contract': contract
-                }
-                print(f"✓ 加载合约: {ts_code} ({name}) - {len(df)} 条数据")
-            else:
-                # 如果没有实时数据，尝试加载历史数据
-                filename = ts_code.replace('.', '_') + '_1min.csv'
-                filepath = os.path.join(DATA_DIR, filename)
+            if self.test_mode:
+                # 测试模式：加载历史数据
+                filename = ts_code.replace('.', '_') + f'_{self.time_frame}.csv'
+                filepath = os.path.join(self.data_dir, filename)
                 
                 if os.path.exists(filepath):
                     df = pd.read_csv(filepath, encoding='utf-8-sig')
-                    # 统一列名
                     if 'trade_time' in df.columns:
                         df['time'] = df['trade_time']
-                        # 按时间排序
-                        df = df.sort_values('time').reset_index(drop=True)
-                    # 使用全部历史数据用于测试
+                    df = df.sort_values('time').reset_index(drop=True)
+                    
                     self.contract_data[ts_code] = {
                         'data': df,
                         'name': name,
                         'contract': contract,
                         'is_simulation': True
                     }
-                    print(f"⚠ 加载合约(模拟): {ts_code} ({name}) - {len(df)} 条数据")
+                    print(f"⚠ 加载合约({self.time_frame},历史): {ts_code} ({name}) - {len(df)} 条")
                 else:
-                    print(f"✗ 合约数据不存在: {ts_code}")
+                    print(f"✗ 历史数据不存在: {ts_code}")
+            else:
+                # 实盘模式：获取当日1分钟数据并合并
+                df_1min = self.get_realtime_data(ts_code)
+                
+                if df_1min is not None and len(df_1min) > 0:
+                    # 合并成目标周期
+                    if self.time_frame == '1min':
+                        df = df_1min
+                    else:
+                        df = self.resample_1min_to_target(df_1min, self.time_frame)
+                    
+                    if len(df) > 0:
+                        df['time'] = df.get('time') or df.get('trade_time', '')
+                        
+                        self.contract_data[ts_code] = {
+                            'data': df,
+                            'name': name,
+                            'contract': contract,
+                            'is_simulation': False
+                        }
+                        print(f"✓ 加载合约({self.time_frame},实时): {ts_code} ({name}) - {len(df)} 条")
+                    else:
+                        print(f"✗ 无有效数据: {ts_code}")
+                else:
+                    print(f"✗ 获取实时数据失败: {ts_code}")
     
     def get_realtime_data(self, ts_code: str) -> pd.DataFrame:
         """获取当日实时数据"""
@@ -256,6 +324,116 @@ class RealtimeTrader:
         
         return all_signals
     
+    def check_volume_breakout(self, df: pd.DataFrame, strategy_config: dict) -> list:
+        """检测放量K线（不判断是否开仓）"""
+        signals = []
+        
+        # 直接使用已加载的策略实例
+        strategy_instance = strategy_config.get('instance')
+        if not strategy_instance:
+            return []
+        
+        # 统一列名：确保有time列
+        df = df.copy()
+        if 'trade_time' in df.columns and 'time' not in df.columns:
+            df['time'] = df['trade_time']
+        
+        if 'time' not in df.columns:
+            return []
+        
+        try:
+            lookback_bars = strategy_config['params'].get('lookback_bars', 15)
+            volume_multiplier = strategy_config['params'].get('volume_multiplier', 3)
+            
+            if len(df) < lookback_bars + 2:
+                return []
+            
+            # 检查所有未确认的放量K（检查所有K，不只最后10根）
+            for i in range(lookback_bars + 1, len(df)):
+                curr = df.iloc[i]
+                prev_n = df.iloc[i-lookback_bars-1:i-1]
+                
+                # 放量条件
+                vol_threshold = prev_n['vol'].mean() * volume_multiplier
+                if curr['vol'] > vol_threshold:
+                    # 放量了
+                    if curr['low'] <= prev_n['low'].min():
+                        direction = 'long'
+                        breakout_type = 'low'
+                    elif curr['high'] >= prev_n['high'].max():
+                        direction = 'short'
+                        breakout_type = 'high'
+                    else:
+                        continue
+                    
+                    # 获取时间字段
+                    time_val = curr.get('time') or curr.get('trade_time', '')
+                    
+                    # 生成放量K的唯一key（用于去重）
+                    breakout_key = f"{strategy_config['config'].get('ts_code', '')}_{time_val}"
+                    
+                    signals.append({
+                        'time': time_val,
+                        'direction': direction,
+                        'price': curr['close'],
+                        'volume': curr['vol'],
+                        'avg_volume': prev_n['vol'].mean(),
+                        'breakout_type': breakout_type,
+                        'breakout_key': breakout_key,  # 用于去重
+                    })
+        
+        except Exception as e:
+            print(f"检测放量K出错: {e}")
+        
+        return signals
+    
+    def check_all_volume_breakouts(self) -> list:
+        """检查所有合约的放量K"""
+        all_breakouts = []
+        
+        for ts_code, contract_info in self.contract_data.items():
+            df = contract_info['data']
+            name = contract_info['name']
+            
+            for strat_name, strategy_config in self.strategies.items():
+                breakouts = self.check_volume_breakout(df, strategy_config)
+                
+                for b in breakouts:
+                    # 过滤掉已提示过的放量K
+                    if b.get('breakout_key') in self.reported_breakouts:
+                        continue
+                    
+                    all_breakouts.append({
+                        'contract': ts_code,
+                        'name': name,
+                        'strategy': strat_name,
+                        'time': b['time'],
+                        'direction': b['direction'],
+                        'price': b['price'],
+                        'volume': b['volume'],
+                        'avg_volume': b['avg_volume'],
+                        'breakout_type': b['breakout_type'],
+                        'breakout_key': b.get('breakout_key'),
+                    })
+        
+        return all_breakouts
+    
+    def print_volume_breakout(self, b: dict):
+        """打印放量K通报"""
+        direction_cn = '🔴 放量下跌' if b['direction'] == 'short' else '🟢 放量上涨'
+        breakout_cn = '突破最低点' if b['breakout_type'] == 'low' else '突破最高点'
+        
+        print(f"\n{'='*70}")
+        print(f"🔥 放量K提示!")
+        print(f"{'='*70}")
+        print(f"📌 合约: {b['name']} ({b['contract']})")
+        print(f"⏰ 时间: {b['time']}")
+        print(f"📈 状态: {direction_cn} - {breakout_cn}")
+        print(f"💰 价格: {b['price']}")
+        print(f"📊 成交量: {b['volume']:.0f} (均量: {b['avg_volume']:.0f}, 倍数: {b['volume']/b['avg_volume']:.1f}x)")
+        print(f"📋 等待后2根K确认方向后开仓...")
+        print(f"{'='*70}\n")
+    
     def print_signal(self, signal: dict, index: int = None):
         """打印信号"""
         # 转换numpy类型为Python原生类型
@@ -294,14 +472,25 @@ class RealtimeTrader:
             ts_code = contract['ts_code']
             name = contract.get('name', ts_code)
             
-            df = self.get_realtime_data(ts_code)
+            # 获取当日1分钟数据
+            df_1min = self.get_realtime_data(ts_code)
             
-            if df is not None and len(df) > 0:
-                self.contract_data[ts_code] = {
-                    'data': df,
-                    'name': name,
-                    'contract': contract
-                }
+            if df_1min is not None and len(df_1min) > 0:
+                # 合并成目标周期
+                if self.time_frame == '1min':
+                    df = df_1min
+                else:
+                    df = self.resample_1min_to_target(df_1min, self.time_frame)
+                
+                if len(df) > 0:
+                    df['time'] = df.get('time') or df.get('trade_time', '')
+                    
+                    self.contract_data[ts_code] = {
+                        'data': df,
+                        'name': name,
+                        'contract': contract,
+                        'is_simulation': False
+                    }
     
     def run_once(self, first_run: bool = False):
         """
@@ -314,6 +503,25 @@ class RealtimeTrader:
         if not self.test_mode:
             self.refresh_realtime_data()
         
+        # 1. 先检查放量K并通报
+        all_breakouts = self.check_all_volume_breakouts()
+        
+        if first_run:
+            # 第一次运行，打印所有放量K
+            for b in all_breakouts:
+                self.print_volume_breakout(b)
+                # 添加到已提示集合
+                if b.get('breakout_key'):
+                    self.reported_breakouts.add(b['breakout_key'])
+        else:
+            # 后续运行，只打印新出现的放量K
+            for b in all_breakouts:
+                # 添加到已提示集合（避免本次循环内重复）
+                if b.get('breakout_key'):
+                    self.reported_breakouts.add(b['breakout_key'])
+                self.print_volume_breakout(b)
+        
+        # 2. 再检查开仓信号
         all_signals = self.check_all_contracts()
         
         if not all_signals:
@@ -346,6 +554,8 @@ class RealtimeTrader:
         print("\n" + "="*70)
         print("实时期货交易策略系统启动")
         print("="*70)
+        print(f"📊 时间周期: {self.time_frame}")
+        print(f"📁 数据目录: {self.data_dir}")
         
         # 第一次运行，打印所有历史信号
         self.run_once(first_run=True)

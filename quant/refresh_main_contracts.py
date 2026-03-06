@@ -115,14 +115,17 @@ def main():
     print("\n1. 获取所有合约...")
     all_df = get_all_contracts()
     
-    # 2. 过滤未退市
-    current_date = '20260302'
+    # 2. 过滤未退市（动态获取当前日期）
+    current_date = datetime.now().strftime('%Y%m%d')
     all_df = all_df[all_df['delist_date'].fillna('20990101') >= current_date]
     
-    # 3. 提取年月，筛选最近5个月
+    # 3. 提取年月，筛选最近6个月
     all_df['ym'] = all_df['ts_code'].apply(extract_ym)
-    all_df = all_df[(all_df['ym'] >= 202603) & (all_df['ym'] <= 202608)]
-    print(f"   5个月内合约: {len(all_df)} 个")
+    now = datetime.now()
+    current_ym = now.year * 100 + now.month
+    six_months_later_ym = ((now.year if now.month <= 6 else now.year + 1) * 100 + (now.month + 5 if now.month <= 7 else now.month - 7))
+    all_df = all_df[(all_df['ym'] >= current_ym) & (all_df['ym'] <= six_months_later_ym)]
+    print(f"   6个月内合约: {len(all_df)} 个")
     
     # 4. 获取每个品种的主力合约
     print("\n2. 确定主力合约...")

@@ -21,10 +21,38 @@ from future_base import VolumeBreakoutStrategy
 class ThreeConsecutiveKlineStrategy(VolumeBreakoutStrategy):
     """三连K线策略"""
     
+    # 各品种的最小止损tick数
+    MIN_STOP_LOSS_TICKS = {
+        'FG': 4,   # 玻璃
+        'SA': 4,   # 纯碱
+        'RB': 2,   # 螺纹钢
+        'AU': 2,   # 沪金
+        'AG': 2,   # 白银
+        'CU': 2,   # 铜
+        'AL': 2,   # 铝
+        'ZN': 2,   # 锌
+        'PB': 2,   # 铅
+        'NI': 2,   # 镍
+        'RU': 2,   # 橡胶
+        'TA': 4,   # PTA
+        'MA': 4,   # 甲醇
+        'ZC': 4,   # 动力煤
+        'CF': 4,   # 棉花
+        'SR': 4,   # 白糖
+        'RM': 4,   # 菜粕
+        'OI': 4,   # 菜油
+        'J': 2,    # 焦炭
+        'JM': 2,   # 焦煤
+        'I': 2,    # 铁矿石
+        'J': 2,    # 螺纹钢
+        'HC': 2,   # 热卷
+    }
+    
     def __init__(self, params: dict = None):
         super().__init__("三连K策略v3", params)
         self.lookback_bars = self.params.get('lookback_bars', 15)
         self.volume_multiplier = self.params.get('volume_multiplier', 3)
+        self.min_stop_loss_ticks = self.params.get('min_stop_loss_ticks', 2)  # 默认最小2tick
     
     def check_signals(self, df: pd.DataFrame) -> list:
         """
@@ -147,17 +175,91 @@ class ThreeConsecutiveKlineStrategy(VolumeBreakoutStrategy):
                 entry_price = signal['entry_price']
                 stop_loss = signal['stop_loss']
                 
+                # 止盈止损距离必须 >= 最小报价变动 x 2
+                # 例如螺纹钢报价87，最小变动1，那么止盈止损距离必须>=2
+                # 如果计算出来止盈=86,止损=88，距离=1<2，就不开单
+                risk = abs(entry_price - stop_loss)
+                
+                # 获取品种代码
+                ts_code = df.iloc[i].get('ts_code', '')
+                variety = ''.join([c for c in str(ts_code) if c.isalpha()]) if ts_code else ''
+                
+                # 获取该品种的最小报价变动(tick size)
+                tick_size = self._get_tick_size(variety)
+                min_risk = tick_size * 2  # 必须 >= 2倍最小变动
+                
+                if risk < min_risk:
+                    # 止盈止损距离太小，跳过
+                    continue
+                
                 # 计算止盈止损
                 tp_sl = self.calculate_tp_sl(
                     signal['direction'],
                     entry_price,
                     stop_loss
                 )
+                
+                # 额外检查：止盈距离也要 >= 2倍最小变动
+                tp1 = tp_sl.get('take_profit_1')
+                if tp1:
+                    tp_distance = abs(entry_price - tp1)
+                    if tp_distance < min_risk:
+                        continue
+                
                 signal.update(tp_sl)
                 signal['volume'] = self.default_volume
                 signals.append(signal)
         
         return signals
+    
+    def _get_tick_size(self, variety: str) -> float:
+        """获取品种的tick大小"""
+        tick_sizes = {
+            'FG': 1,   # 玻璃 1元
+            'SA': 1,   # 纯碱 1元
+            'RB': 1,   # 螺纹钢 1元
+            'AU': 0.05, # 沪金 0.05元/克
+            'AG': 1,   # 白银 1元/千克
+            'CU': 10,  # 铜 10元/吨
+            'AL': 5,   # 铝 5元/吨
+            'ZN': 5,   # 锌 5元/吨
+            'PB': 5,   # 铅 5元/吨
+            'NI': 10,  # 镍 10元/吨
+            'RU': 5,   # 橡胶 5元/吨
+            'TA': 2,   # PTA 2元/吨
+            'MA': 1,   # 甲醇 1元/吨
+            'ZC': 0.4, # 动力煤 0.4元/吨
+            'CF': 5,   # 棉花 5元/吨
+            'SR': 1,   # 白糖 1元/吨
+            'RM': 1,   # 菜粕 1元/吨
+            'OI': 1,   # 菜油 1元/吨
+            'J': 0.5,  # 焦炭 0.5元/吨
+            'JM': 0.5, # 焦煤 0.5元/吨
+            'I': 0.5,  # 铁矿石 0.5元/吨
+            'HC': 1,   # 热卷 1元/吨
+            'PP': 1,   # PP 1元/吨
+            'PVC': 1,  # PVC 1元/吨
+            'L': 1,    # 塑料 1元/吨
+            'V': 1,    # PVC 1元/吨
+            'EG': 1,   # 乙二醇 1元/吨
+            'SC': 0.1, # 原油 0.1元/桶
+            'AP': 1,   # 苹果 1元/吨
+            'CJ': 1,   # 红枣 1元/吨
+            'UR': 1,   # 尿素 1元/吨
+            'JR': 1,   # 粳稻 1元/吨
+            'LR': 1,   # 晚稻 1元/吨
+            'RI': 1,   # 早稻 1元/吨
+            'WH': 1,   # 强麦 1元/吨
+            'PM': 1,   # 普麦 1元/吨
+            'CY': 1,   # 棉纱 1元/吨
+            'PF': 1,   # 短纤 1元/吨
+            'PK': 1,   # 花生 1元/吨
+            'WS': 1,   # 白麦 1元/吨
+            'WT': 1,   # 小麦 1元/吨
+            'SM': 2,   # 棉纱 2元/吨
+            'LU': 1,   # 原油 1元/吨
+        }
+        return tick_sizes.get(variety, 1)
 
 
 # 便捷函数：用于历史回测
