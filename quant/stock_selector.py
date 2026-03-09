@@ -166,7 +166,58 @@ def analyze_buy_point(df: pd.DataFrame, buy_idx: int) -> dict:
     max_drawdown_date_30 = None
     max_drawdown_days_30 = 0
     
-    result = '持有'  # 结果: 止盈/止损/持有
+    result = '持有'  # 结果: 止盈/止损/持有/划痕
+    
+    # ====== 划痕判断逻辑 (第5天直接划痕) ======
+    # 开仓后第5天检查：如果前5天没有放量，直接划痕出局（不等后续止盈/止损）
+    buy_vol = df.iloc[buy_idx]['vol']
+    future_end_5 = min(buy_idx + 11, len(df))
+    
+    # 先检查前5天是否有放量
+    has_vol_increase = False
+    for j in range(buy_idx + 1, min(buy_idx + 11, len(df))):
+        if df.iloc[j]['vol'] > buy_vol:
+            has_vol_increase = True
+            break
+    
+    # 如果前5天没有放量，第5天直接划痕出局
+    if not has_vol_increase:
+        exit_price = df.iloc[buy_idx + 10]['close']
+        exit_ret = (exit_price - buy_price) / buy_price * 100
+        result = '划痕'
+        
+        # 计算划痕时的收益和回撤
+        max_ret_5d = -float('inf')
+        max_dd_5d = 0
+        for j in range(buy_idx + 1, buy_idx + 11):
+            if j >= len(df):
+                break
+            ret = (df.iloc[j]['close'] - buy_price) / buy_price * 100
+            if ret > max_ret_5d:
+                max_ret_5d = ret
+            peak = df.iloc[buy_idx:j+1]['high'].max()
+            dd = (peak - df.iloc[j]['close']) / peak * 100
+            if dd > max_dd_5d:
+                max_dd_5d = dd
+        
+        return {
+            'max_return': max_ret_5d,
+            'max_return_date': df.iloc[buy_idx + 5]['trade_date'],
+            'max_return_days': 10,
+            'max_drawdown': max_dd_5d,
+            'max_drawdown_date': df.iloc[buy_idx + 5]['trade_date'],
+            'max_drawdown_days': 10,
+            'max_return_30': max_ret_5d,
+            'max_return_date_30': df.iloc[buy_idx + 5]['trade_date'],
+            'max_return_days_30': 10,
+            'max_drawdown_30': max_dd_5d,
+            'max_drawdown_date_30': df.iloc[buy_idx + 5]['trade_date'],
+            'max_drawdown_days_30': 10,
+            'result': result,
+            'exit_result': '划痕',
+            'exit_return': exit_ret,
+        }
+    # ====== 划痕判断结束 ======
     
     # 21天分析
     for j in range(buy_idx + 1, future_end_21):
@@ -498,10 +549,12 @@ def main():
         hold_total = all_results_list.count('持有')
         win_rate_total = tp_total / total_bp * 100 if total_bp > 0 else 0
         
+        scratch_total = all_results_list.count('划痕')
         print("\n【5%止盈止损统计】")
         print(f"  总买点: {total_bp} 个")
         print(f"  止盈: {tp_total} 个 ({tp_total/total_bp*100:.1f}%)")
         print(f"  止损: {sl_total} 个 ({sl_total/total_bp*100:.1f}%)")
+        print(f"  划痕: {scratch_total} 个 ({scratch_total/total_bp*100:.1f}%)")
         print(f"  持有: {hold_total} 个 ({hold_total/total_bp*100:.1f}%)")
         print(f"  胜率(止盈/(止盈+止损)): {tp_total/(tp_total+sl_total)*100:.1f}%")
     
@@ -531,7 +584,7 @@ def main():
                     '30日最大回撤(%)': round(bp.get('max_drawdown_30', 0), 2),
                     '30日回撤日期': bp.get('max_drawdown_date_30', ''),
                     '30日回撤天数': bp.get('max_drawdown_days_30', 0),
-                    '5%止盈止损结果': bp.get('result', '持有'),  # 止盈/止损/持有
+                    '5%止盈止损结果': bp.get('result', '持有'),  # 止盈/止损/持有/划痕
                 })
         
         df_detailed = pd.DataFrame(detailed_data)
@@ -754,6 +807,37 @@ def main():
                 vol_condition = (df_stock.iloc[last_idx - 1]['vol'] < vol_20d_avg) or (df_stock.iloc[last_idx - 2]['vol'] < vol_20d_avg)
                 
                 if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition:
+                    # 获取历史胜率等信息
+                    buy_points = r.get('buy_points', [])
+                    historical_stats = {
+                        '历史买点次数': 0,
+                        '历史胜率(%)': '-',
+                        '历史盈利次数': 0,
+                        '历史亏损次数': 0,
+                        '历史持有次数': 0,
+                        '历史平均收益(%)': '-'
+                    }
+                    
+                    if buy_points:
+                        # 统计历史买点
+                        wins = sum(1 for bp in buy_points if bp.get('result') == '止盈')
+                        losses = sum(1 for bp in buy_points if bp.get('result') == '止损')
+                        holds = sum(1 for bp in buy_points if bp.get('result') in ['划痕', '持有'])
+                        total = wins + losses + holds
+                        
+                        if total > 0:
+                            win_rate = wins / total * 100
+                            # 使用max_return字段计算平均收益
+                            returns = [bp.get('max_return', 0) for bp in buy_points if bp.get('max_return') is not None]
+                            avg_return = sum(returns) / len(returns) if returns else 0
+                            
+                            historical_stats['历史买点次数'] = total
+                            historical_stats['历史胜率(%)'] = round(win_rate, 1)
+                            historical_stats['历史盈利次数'] = wins
+                            historical_stats['历史亏损次数'] = losses
+                            historical_stats['历史持有次数'] = holds
+                            historical_stats['历史平均收益(%)'] = round(avg_return, 1)
+                    
                     tomorrow_points.append({
                         '股票代码': ts_code,
                         '股票名称': r['name'],
@@ -762,6 +846,12 @@ def main():
                         '15日涨幅(%)': round(change_15d, 2),
                         '60日距高(%)': round(distance_to_high, 2),
                         '量比': round(vol_ratio, 2),
+                        '历史买点次数': historical_stats['历史买点次数'],
+                        '历史胜率(%)': historical_stats['历史胜率(%)'],
+                        '历史盈利次数': historical_stats['历史盈利次数'],
+                        '历史亏损次数': historical_stats['历史亏损次数'],
+                        '历史持有次数': historical_stats['历史持有次数'],
+                        '历史平均收益(%)': historical_stats['历史平均收益(%)'],
                         '状态': '✅ 今日已触发买点'
                     })
             except Exception as e:
