@@ -27,7 +27,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 获取日期范围
 end_date = datetime.now().strftime('%Y%m%d')
-start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
+start_date = (datetime.now() - timedelta(days=730)).strftime('%Y%m%d')
 
 print("="*60)
 print("获取A股日线数据")

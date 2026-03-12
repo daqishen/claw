@@ -168,51 +168,51 @@ def analyze_buy_point(df: pd.DataFrame, buy_idx: int) -> dict:
     
     result = '持有'  # 结果: 止盈/止损/持有/划痕
     
-    # ====== 划痕判断逻辑 (第5天直接划痕) ======
-    # 开仓后第5天检查：如果前5天没有放量，直接划痕出局（不等后续止盈/止损）
+    # ====== 划痕判断逻辑 (第10天直接划痕) ======
+    # 开仓后第10天检查：如果前10天没有放量，直接划痕出局（不等后续止盈/止损）
     buy_vol = df.iloc[buy_idx]['vol']
-    future_end_5 = min(buy_idx + 11, len(df))
+    future_end_20 = min(buy_idx + 41, len(df))
     
-    # 先检查前5天是否有放量
+    # 先检查开仓后10天是否有放量
     has_vol_increase = False
     for j in range(buy_idx + 1, min(buy_idx + 11, len(df))):
         if df.iloc[j]['vol'] > buy_vol:
             has_vol_increase = True
             break
     
-    # 如果前5天没有放量，第5天直接划痕出局
+    # 如果前10天没有放量，第10天直接划痕出局
     if not has_vol_increase:
         exit_price = df.iloc[buy_idx + 10]['close']
         exit_ret = (exit_price - buy_price) / buy_price * 100
         result = '划痕'
         
         # 计算划痕时的收益和回撤
-        max_ret_5d = -float('inf')
-        max_dd_5d = 0
-        for j in range(buy_idx + 1, buy_idx + 11):
+        max_ret_20d = -float('inf')
+        max_dd_20d = 0
+        for j in range(buy_idx + 1, min(buy_idx + 11, len(df))):
             if j >= len(df):
                 break
             ret = (df.iloc[j]['close'] - buy_price) / buy_price * 100
-            if ret > max_ret_5d:
-                max_ret_5d = ret
+            if ret > max_ret_20d:
+                max_ret_20d = ret
             peak = df.iloc[buy_idx:j+1]['high'].max()
             dd = (peak - df.iloc[j]['close']) / peak * 100
-            if dd > max_dd_5d:
-                max_dd_5d = dd
+            if dd > max_dd_20d:
+                max_dd_20d = dd
         
         return {
-            'max_return': max_ret_5d,
-            'max_return_date': df.iloc[buy_idx + 5]['trade_date'],
-            'max_return_days': 10,
-            'max_drawdown': max_dd_5d,
-            'max_drawdown_date': df.iloc[buy_idx + 5]['trade_date'],
-            'max_drawdown_days': 10,
-            'max_return_30': max_ret_5d,
-            'max_return_date_30': df.iloc[buy_idx + 5]['trade_date'],
-            'max_return_days_30': 10,
-            'max_drawdown_30': max_dd_5d,
-            'max_drawdown_date_30': df.iloc[buy_idx + 5]['trade_date'],
-            'max_drawdown_days_30': 10,
+            'max_return': max_ret_20d,
+            'max_return_date': df.iloc[buy_idx + 20]['trade_date'],
+            'max_return_days': 20,
+            'max_drawdown': max_dd_20d,
+            'max_drawdown_date': df.iloc[buy_idx + 20]['trade_date'],
+            'max_drawdown_days': 20,
+            'max_return_30': max_ret_20d,
+            'max_return_date_30': df.iloc[buy_idx + 20]['trade_date'],
+            'max_return_days_30': 20,
+            'max_drawdown_30': max_dd_20d,
+            'max_drawdown_date_30': df.iloc[buy_idx + 20]['trade_date'],
+            'max_drawdown_days_30': 20,
             'result': result,
             'exit_result': '划痕',
             'exit_return': exit_ret,
@@ -230,8 +230,14 @@ def analyze_buy_point(df: pd.DataFrame, buy_idx: int) -> dict:
         
         if high_ret >= tp_rate:
             result = '止盈'
+            exit_price = buy_price * (1 + tp_rate / 100)  # 按目标止盈价卖出
+            exit_ret = tp_rate
+            break  # 触及止盈，退出循环
         elif low_ret <= sl_rate:
             result = '止损'
+            exit_price = buy_price * (1 + sl_rate / 100)  # 按目标止损价卖出
+            exit_ret = sl_rate
+            break  # 触及止损，退出循环
         
         future_price = df.iloc[j]['close']
         ret = (future_price - buy_price) / buy_price * 100
@@ -313,8 +319,22 @@ def check_buy_points_all(df: pd.DataFrame) -> list:
         # 新增条件：前两个交易日内，有一天的成交量低于20日均量
         vol_condition = (df.iloc[i-1]['vol'] < vol_20d_avg) or (df.iloc[i-2]['vol'] < vol_20d_avg)
         
+        # 新增过滤条件：跌破5日新低 AND 低于昨日实体 → 不开仓
+        # 条件1：当日最低点跌破5日最低
+        low_5day = df.iloc[i-4:i+1]['low'].min()
+        is_broken_5day_low = today['low'] <= low_5day * 1.001
+        
+        # 条件2：当日收盘价低于昨日K线实体上沿
+        yesterday_open = df.iloc[i-1]['open']
+        yesterday_close = df.iloc[i-1]['close']
+        yesterday_high = max(yesterday_open, yesterday_close)
+        is_below_yesterday_body = today['close'] < yesterday_high
+        
+        # 两个条件同时满足才过滤
+        new_filter = is_broken_5day_low and is_below_yesterday_body
+        
         # 检查条件
-        if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition:
+        if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition and not new_filter:
             results.append({
                 'date': today['trade_date'],
                 'close': today['close'],
@@ -359,8 +379,22 @@ def check_buy_points(df: pd.DataFrame) -> list:
         # 新增条件：前两个交易日内，有一天的成交量低于20日均量
         vol_condition = (df.iloc[i-1]['vol'] < vol_20d_avg) or (df.iloc[i-2]['vol'] < vol_20d_avg)
         
+        # 新增过滤条件：跌破5日新低 AND 低于昨日实体 → 不开仓
+        # 条件1：当日最低点跌破5日最低
+        low_5day = df.iloc[i-4:i+1]['low'].min()
+        is_broken_5day_low = today['low'] <= low_5day * 1.001
+        
+        # 条件2：当日收盘价低于昨日K线实体上沿
+        yesterday_open = df.iloc[i-1]['open']
+        yesterday_close = df.iloc[i-1]['close']
+        yesterday_high = max(yesterday_open, yesterday_close)
+        is_below_yesterday_body = today['close'] < yesterday_high
+        
+        # 两个条件同时满足才过滤
+        new_filter = is_broken_5day_low and is_below_yesterday_body
+        
         # 检查条件
-        if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition:
+        if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition and not new_filter:
             # 分析卖点
             sell_analysis = analyze_buy_point(df, i)
             
@@ -798,7 +832,7 @@ def main():
                 price_15d_ago = df_stock.iloc[last_idx - 15]['close']
                 change_15d = (today['close'] - price_15d_ago) / price_15d_ago * 100
                 
-                high_60d = df_stock.iloc[last_idx - 60:last_idx + 1]['high'].max()
+                high_60d = df_stock.iloc[last_idx - 60:last_idx]['high'].max()
                 distance_to_high = (high_60d - today['close']) / high_60d * 100
                 
                 vol_20d_avg = df_stock.iloc[last_idx - 20:last_idx]['vol'].mean()
@@ -806,7 +840,16 @@ def main():
                 
                 vol_condition = (df_stock.iloc[last_idx - 1]['vol'] < vol_20d_avg) or (df_stock.iloc[last_idx - 2]['vol'] < vol_20d_avg)
                 
-                if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition:
+                # 新增过滤条件：跌破5日新低 AND 低于昨日实体 → 不开仓
+                low_5day = df_stock.iloc[last_idx-4:last_idx+1]['low'].min()
+                is_broken_5day_low = today['low'] <= low_5day * 1.001
+                yesterday_open = df_stock.iloc[last_idx-1]['open']
+                yesterday_close = df_stock.iloc[last_idx-1]['close']
+                yesterday_high = max(yesterday_open, yesterday_close)
+                is_below_yesterday_body = today['close'] < yesterday_high
+                new_filter = is_broken_5day_low and is_below_yesterday_body
+                
+                if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition and not new_filter:
                     # 获取历史胜率等信息
                     buy_points = r.get('buy_points', [])
                     historical_stats = {
