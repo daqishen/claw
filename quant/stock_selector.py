@@ -168,28 +168,86 @@ def analyze_buy_point(df: pd.DataFrame, buy_idx: int) -> dict:
     
     result = '持有'  # 结果: 止盈/止损/持有/划痕
     
-    # ====== 划痕判断逻辑 (第10天直接划痕) ======
-    # 开仓后第10天检查：如果前10天没有放量，直接划痕出局（不等后续止盈/止损）
+    # ====== 新逻辑：先判断前10天止盈/止损，再判断划痕 ======
     buy_vol = df.iloc[buy_idx]['vol']
-    future_end_20 = min(buy_idx + 41, len(df))
+    day10_reached_tp = None   # 第几天触及止盈
+    day10_reached_sl = None   # 第几天触及止损
     
-    # 先检查开仓后10天是否有放量
+    # 1. 先判断前10天是否触发止盈/止损
+    for j in range(buy_idx + 1, min(buy_idx + 11, len(df))):
+        future_high = df.iloc[j]['high']
+        future_low = df.iloc[j]['low']
+        
+        high_ret = (future_high - buy_price) / buy_price * 100
+        low_ret = (future_low - buy_price) / buy_price * 100
+        
+        if high_ret >= tp_rate:
+            day10_reached_tp = j - buy_idx
+        if low_ret <= sl_rate:
+            day10_reached_sl = j - buy_idx
+    
+    # 2. 检查第10天是否划痕
+    # 前10天没有触发止盈/止损，且没有放量
     has_vol_increase = False
     for j in range(buy_idx + 1, min(buy_idx + 11, len(df))):
         if df.iloc[j]['vol'] > buy_vol:
             has_vol_increase = True
             break
     
-    # 如果前10天没有放量，第10天直接划痕出局
-    if not has_vol_increase:
+    if not has_vol_increase and day10_reached_tp is None and day10_reached_sl is None:
+        # 第10天划痕
         exit_price = df.iloc[buy_idx + 10]['close']
         exit_ret = (exit_price - buy_price) / buy_price * 100
-        result = '划痕'
         
-        # 计算划痕时的收益和回撤
+        # 计算前10天的最大收益和回撤
+        max_ret_10d = -float('inf')
+        max_dd_10d = 0
+        for j in range(buy_idx + 1, min(buy_idx + 11, len(df))):
+            if j >= len(df):
+                break
+            ret = (df.iloc[j]['close'] - buy_price) / buy_price * 100
+            if ret > max_ret_10d:
+                max_ret_10d = ret
+            peak = df.iloc[buy_idx:j+1]['high'].max()
+            dd = (peak - df.iloc[j]['close']) / peak * 100
+            if dd > max_dd_10d:
+                max_dd_10d = dd
+        
+        return {
+            'max_return': max_ret_10d,
+            'max_return_date': df.iloc[buy_idx + 10]['trade_date'],
+            'max_return_days': 10,
+            'max_drawdown': max_dd_10d,
+            'max_drawdown_date': df.iloc[buy_idx + 10]['trade_date'],
+            'max_drawdown_days': 10,
+            'max_return_30': max_ret_10d,
+            'max_return_date_30': df.iloc[buy_idx + 10]['trade_date'],
+            'max_return_days_30': 10,
+            'max_drawdown_30': max_dd_10d,
+            'max_drawdown_date_30': df.iloc[buy_idx + 10]['trade_date'],
+            'max_drawdown_days_30': 10,
+            'result': '划痕',
+            'exit_result': '划痕',
+            'exit_return': exit_ret,
+        }
+    
+    # 3. 如果前10天已经触发止盈或止损，直接返回
+    if day10_reached_tp is not None or day10_reached_sl is not None:
+        # 止盈优先
+        if day10_reached_tp is not None:
+            result = '止盈'
+            exit_ret = tp_rate
+            exit_day = day10_reached_tp
+        else:
+            result = '止损'
+            exit_ret = sl_rate
+            exit_day = day10_reached_sl
+        
+        # 计算到退出日的最大收益和回撤
         max_ret_20d = -float('inf')
         max_dd_20d = 0
-        for j in range(buy_idx + 1, min(buy_idx + 11, len(df))):
+        exit_idx = buy_idx + exit_day
+        for j in range(buy_idx + 1, exit_idx + 1):
             if j >= len(df):
                 break
             ret = (df.iloc[j]['close'] - buy_price) / buy_price * 100
@@ -202,25 +260,24 @@ def analyze_buy_point(df: pd.DataFrame, buy_idx: int) -> dict:
         
         return {
             'max_return': max_ret_20d,
-            'max_return_date': df.iloc[buy_idx + 20]['trade_date'],
-            'max_return_days': 20,
+            'max_return_date': df.iloc[exit_idx]['trade_date'],
+            'max_return_days': exit_day,
             'max_drawdown': max_dd_20d,
-            'max_drawdown_date': df.iloc[buy_idx + 20]['trade_date'],
-            'max_drawdown_days': 20,
+            'max_drawdown_date': df.iloc[exit_idx]['trade_date'],
+            'max_drawdown_days': exit_day,
             'max_return_30': max_ret_20d,
-            'max_return_date_30': df.iloc[buy_idx + 20]['trade_date'],
-            'max_return_days_30': 20,
+            'max_return_date_30': df.iloc[exit_idx]['trade_date'],
+            'max_return_days_30': exit_day,
             'max_drawdown_30': max_dd_20d,
-            'max_drawdown_date_30': df.iloc[buy_idx + 20]['trade_date'],
-            'max_drawdown_days_30': 20,
+            'max_drawdown_date_30': df.iloc[exit_idx]['trade_date'],
+            'max_drawdown_days_30': exit_day,
             'result': result,
-            'exit_result': '划痕',
+            'exit_result': result,
             'exit_return': exit_ret,
         }
-    # ====== 划痕判断结束 ======
     
-    # 21天分析
-    for j in range(buy_idx + 1, future_end_21):
+    # ====== 4. 前10天没触发止盈/止损也没划痕，继续判断第11-21天 ======
+    for j in range(buy_idx + 11, future_end_21):
         future_high = df.iloc[j]['high']
         future_low = df.iloc[j]['low']
         future_date = df.iloc[j]['trade_date']
@@ -228,19 +285,25 @@ def analyze_buy_point(df: pd.DataFrame, buy_idx: int) -> dict:
         high_ret = (future_high - buy_price) / buy_price * 100
         low_ret = (future_low - buy_price) / buy_price * 100
         
-        if high_ret >= tp_rate:
-            result = '止盈'
-            exit_price = buy_price * (1 + tp_rate / 100)  # 按目标止盈价卖出
-            exit_ret = tp_rate
-            break  # 触及止盈，退出循环
-        elif low_ret <= sl_rate:
-            result = '止损'
-            exit_price = buy_price * (1 + sl_rate / 100)  # 按目标止损价卖出
-            exit_ret = sl_rate
-            break  # 触及止损，退出循环
-        
         future_price = df.iloc[j]['close']
         ret = (future_price - buy_price) / buy_price * 100
+        
+        if high_ret >= tp_rate:
+            result = '止盈'
+            exit_ret = tp_rate
+            if ret > max_return_21:
+                max_return_21 = ret
+                max_return_date_21 = future_date
+                max_return_days_21 = j - buy_idx
+            break
+        elif low_ret <= sl_rate:
+            result = '止损'
+            exit_ret = sl_rate
+            if ret > max_return_21:
+                max_return_21 = ret
+                max_return_date_21 = future_date
+                max_return_days_21 = j - buy_idx
+            break
         
         if ret > max_return_21:
             max_return_21 = ret
@@ -334,7 +397,7 @@ def check_buy_points_all(df: pd.DataFrame) -> list:
         new_filter = is_broken_5day_low and is_below_yesterday_body
         
         # 检查条件
-        if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition and not new_filter:
+        if change_15d < 15 and distance_to_high < 10 and vol_ratio > 1.5 and vol_condition and not new_filter:
             results.append({
                 'date': today['trade_date'],
                 'close': today['close'],
@@ -394,7 +457,7 @@ def check_buy_points(df: pd.DataFrame) -> list:
         new_filter = is_broken_5day_low and is_below_yesterday_body
         
         # 检查条件
-        if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition and not new_filter:
+        if change_15d < 15 and distance_to_high < 10 and vol_ratio > 1.5 and vol_condition and not new_filter:
             # 分析卖点
             sell_analysis = analyze_buy_point(df, i)
             
@@ -849,7 +912,7 @@ def main():
                 is_below_yesterday_body = today['close'] < yesterday_high
                 new_filter = is_broken_5day_low and is_below_yesterday_body
                 
-                if change_15d < 15 and distance_to_high < 8 and vol_ratio > 1.5 and vol_condition and not new_filter:
+                if change_15d < 15 and distance_to_high < 10 and vol_ratio > 1.5 and vol_condition and not new_filter:
                     # 获取历史胜率等信息
                     buy_points = r.get('buy_points', [])
                     historical_stats = {
@@ -865,7 +928,7 @@ def main():
                         # 统计历史买点
                         wins = sum(1 for bp in buy_points if bp.get('result') == '止盈')
                         losses = sum(1 for bp in buy_points if bp.get('result') == '止损')
-                        holds = sum(1 for bp in buy_points if bp.get('result') in ['划痕', '持有'])
+                        holds = sum(1 for bp in buy_points if bp.get('result') == '持有')
                         total = wins + losses + holds
                         
                         if total > 0:

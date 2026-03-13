@@ -24,7 +24,7 @@ OUTPUT_FILE = f'{OUTPUT_DIR}/realtime_buy_points_{datetime.now().strftime("%Y%m%
 # 选股条件
 MIN_MARKET_CAP = 50
 MAX_CHANGE_15D = 15
-MAX_DISTANCE_HIGH = 8
+MAX_DISTANCE_HIGH = 12
 MIN_VOL_RATIO = 1.5
 
 # 批量获取设置
@@ -43,7 +43,7 @@ def get_historical_stats():
         for ts_code, group in df.groupby('股票代码'):
             wins = sum(1 for r in group['5%止盈止损结果'] if r == '止盈')
             losses = sum(1 for r in group['5%止盈止损结果'] if r == '止损')
-            holds = sum(1 for r in group['5%止盈止损结果'] if r in ['划痕', '持有'])
+            holds = sum(1 for r in group['5%止盈止损结果'] if r == '持有')
             total = wins + losses + holds
             
             if total > 0:
