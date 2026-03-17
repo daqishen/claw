@@ -181,9 +181,10 @@ def analyze_buy_point(df: pd.DataFrame, buy_idx: int) -> dict:
         high_ret = (future_high - buy_price) / buy_price * 100
         low_ret = (future_low - buy_price) / buy_price * 100
         
-        if high_ret >= tp_rate:
+        # 修复：谁先触发就保持谁，不再覆盖
+        if high_ret >= tp_rate and day10_reached_tp is None:
             day10_reached_tp = j - buy_idx
-        if low_ret <= sl_rate:
+        if low_ret <= sl_rate and day10_reached_sl is None:
             day10_reached_sl = j - buy_idx
     
     # 2. 检查第10天是否划痕
@@ -231,17 +232,21 @@ def analyze_buy_point(df: pd.DataFrame, buy_idx: int) -> dict:
             'exit_return': exit_ret,
         }
     
-    # 3. 如果前10天已经触发止盈或止损，直接返回
+    # 3. 如果前10天已经触发止盈或止损，判断谁先发生
     if day10_reached_tp is not None or day10_reached_sl is not None:
-        # 止盈优先
-        if day10_reached_tp is not None:
+        # 比较谁先发生（天数小的先发生）
+        if day10_reached_tp is not None and (day10_reached_sl is None or day10_reached_tp <= day10_reached_sl):
             result = '止盈'
             exit_ret = tp_rate
             exit_day = day10_reached_tp
-        else:
+        elif day10_reached_sl is not None:
             result = '止损'
             exit_ret = sl_rate
             exit_day = day10_reached_sl
+        else:
+            result = '止盈'
+            exit_ret = tp_rate
+            exit_day = day10_reached_tp
         
         # 计算到退出日的最大收益和回撤
         max_ret_20d = -float('inf')
@@ -780,7 +785,8 @@ def main():
                         tp = results.count('止盈')
                         sl = results.count('止损')
                         hold = results.count('持有')
-                        total = len(results)
+                        scratch = results.count('划痕')
+                        total = len(results)  # 包含止盈、止损、持有、划痕
                         win_rate = tp / (tp + sl) * 100 if (tp + sl) > 0 else 0
                         
                         # 计算平均收益
@@ -793,6 +799,7 @@ def main():
                             '历史盈利次数': tp,
                             '历史亏损次数': sl,
                             '历史持有次数': hold,
+                            '历史划痕次数': scratch,
                             '历史平均收益(%)': round(avg_return, 1)
                         }
                 
@@ -929,10 +936,11 @@ def main():
                         wins = sum(1 for bp in buy_points if bp.get('result') == '止盈')
                         losses = sum(1 for bp in buy_points if bp.get('result') == '止损')
                         holds = sum(1 for bp in buy_points if bp.get('result') == '持有')
-                        total = wins + losses + holds
+                        scratches = sum(1 for bp in buy_points if bp.get('result') == '划痕')
+                        total = wins + losses + holds + scratches
                         
                         if total > 0:
-                            win_rate = wins / total * 100
+                            win_rate = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
                             # 使用max_return字段计算平均收益
                             returns = [bp.get('max_return', 0) for bp in buy_points if bp.get('max_return') is not None]
                             avg_return = sum(returns) / len(returns) if returns else 0
@@ -942,6 +950,7 @@ def main():
                             historical_stats['历史盈利次数'] = wins
                             historical_stats['历史亏损次数'] = losses
                             historical_stats['历史持有次数'] = holds
+                            historical_stats['历史划痕次数'] = scratches
                             historical_stats['历史平均收益(%)'] = round(avg_return, 1)
                     
                     tomorrow_points.append({
@@ -957,6 +966,7 @@ def main():
                         '历史盈利次数': historical_stats['历史盈利次数'],
                         '历史亏损次数': historical_stats['历史亏损次数'],
                         '历史持有次数': historical_stats['历史持有次数'],
+                        '历史划痕次数': historical_stats.get('历史划痕次数', 0),
                         '历史平均收益(%)': historical_stats['历史平均收益(%)'],
                         '状态': '✅ 今日已触发买点'
                     })
