@@ -27,6 +27,9 @@ MAX_CHANGE_15D = 15
 MAX_DISTANCE_HIGH = 12
 MIN_VOL_RATIO = 1.5
 
+# 行业黑名单 (历史回测胜率显著低于平均水平的行业)
+INDUSTRY_BLACKLIST = {'医药商业', '生物制药', '化学制药', '中成药'}
+
 # 批量获取设置
 BATCH_SIZE = 45  # 每批获取的股票数量
 
@@ -137,6 +140,15 @@ def select_stocks_realtime():
     # 剔除科创板和ST
     all_stocks = all_stocks[~all_stocks['ts_code'].str.startswith('688')]
     all_stocks = all_stocks[~all_stocks['name'].str.contains(r'ST|\*ST', na=False, regex=True)]
+    
+    # 剔除行业黑名单
+    _stock_list_path = os.path.join(OUTPUT_DIR, 'a_stock_list.csv')
+    if os.path.exists(_stock_list_path):
+        _stock_list_df = pd.read_csv(_stock_list_path)
+        _industry_map = dict(zip(_stock_list_df['ts_code'], _stock_list_df['industry']))
+        all_stocks['industry'] = all_stocks['ts_code'].map(_industry_map)
+        all_stocks = all_stocks[~all_stocks['industry'].isin(INDUSTRY_BLACKLIST)]
+        print(f"  剔除行业黑名单后: {len(all_stocks)} 只")
     
     # 获取市值
     pm_df = pro.stk_premarket(trade_date='20260306')

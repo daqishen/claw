@@ -44,9 +44,20 @@ start_date_1y = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
 # 最小市值门槛 (亿元)
 MIN_MARKET_CAP = 50
 
+# 行业黑名单 (历史回测胜率显著低于平均水平的行业)
+INDUSTRY_BLACKLIST = {'医药商业', '生物制药', '化学制药', '中成药'}
+
 # 缓存市值数据
 market_cap_cache = {}
 premarket_data = None
+
+# 加载行业映射表
+_industry_map = {}
+_stock_list_path = os.path.join(OUTPUT_DIR, 'a_stock_list.csv')
+if os.path.exists(_stock_list_path):
+    _stock_list_df = pd.read_csv(_stock_list_path)
+    _industry_map = dict(zip(_stock_list_df['ts_code'], _stock_list_df['industry']))
+    del _stock_list_df
 
 
 def get_premarket_data(trade_date: str = None) -> pd.DataFrame:
@@ -121,6 +132,11 @@ def is_valid_stock(ts_code: str, name: str) -> bool:
     # 检查市值
     market_cap = get_market_cap(ts_code)
     if market_cap > 0 and market_cap < MIN_MARKET_CAP:
+        return False
+    
+    # 检查行业黑名单
+    industry = _industry_map.get(ts_code, '')
+    if industry in INDUSTRY_BLACKLIST:
         return False
     
     return True
