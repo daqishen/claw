@@ -30,8 +30,46 @@ MIN_VOL_RATIO = 1.5
 # 行业黑名单 (历史回测胜率显著低于平均水平的行业)
 INDUSTRY_BLACKLIST = {'医药商业', '生物制药', '化学制药', '中成药'}
 
+# 大盘观察分数阈值
+MARKET_SCORE_MAX = 2
+MARKET_SCORE_LOOKBACK = 5
+MARKET_SCORE_THRESHOLD = 1.0
+
 # 批量获取设置
 BATCH_SIZE = 45  # 每批获取的股票数量
+
+# 加载上证指数日涨跌幅 (用于大盘观察分数)
+_idx_chg_map = {}
+_idx_path = os.path.join(DATA_DIR, 'idx_000001_SH.csv')
+if os.path.exists(_idx_path):
+    _idx_df = pd.read_csv(_idx_path)
+    _idx_df['trade_date'] = _idx_df['trade_date'].astype(str)
+    _idx_chg_map = dict(zip(_idx_df['trade_date'], _idx_df['pct_chg']))
+    del _idx_df
+
+
+def calc_market_score(df, idx):
+    """计算大盘观察分数 v2 (前5天个股vs上证相对强弱)"""
+    if not _idx_chg_map:
+        return 0
+    score = 0
+    for i in range(1, MARKET_SCORE_LOOKBACK + 1):
+        day_idx = idx - i
+        if day_idx < 1:
+            break
+        today = df.iloc[day_idx]
+        yesterday = df.iloc[day_idx - 1]
+        stock_pct = (today['close'] - yesterday['close']) / yesterday['close'] * 100
+        trade_date = str(today['trade_date']).replace('-', '')
+        idx_pct = _idx_chg_map.get(trade_date, None)
+        if idx_pct is None:
+            continue
+        diff = stock_pct - idx_pct
+        if diff > MARKET_SCORE_THRESHOLD:
+            score += 1
+        elif diff < -MARKET_SCORE_THRESHOLD:
+            score -= 1
+    return score
 
 
 def get_historical_stats():
@@ -260,12 +298,16 @@ def select_stocks_realtime():
             # 两个条件同时满足才过滤
             new_filter = is_broken_5day_low and is_below_yesterday_body
             
-            # 第一阶段筛选：满足基础条件（涨幅、高点距离、缩量）+ 新过滤条件
+            # 大盘观察分数 (基于本地历史数据)
+            market_score = calc_market_score(df, len(df) - 1)
+            
+            # 第一阶段筛选：满足基础条件（涨幅、高点距离、缩量）+ 新过滤条件 + 大盘观察分数
             # 暂时不要求量比，因为今日量比需要实时数据
             if (change_15d < MAX_CHANGE_15D and 
                 distance_to_high < MAX_DISTANCE_HIGH and 
                 vol_condition and 
-                not new_filter):
+                not new_filter and
+                market_score < MARKET_SCORE_MAX):
                 
                 candidate_stocks.append({
                     'full_code': full_code,

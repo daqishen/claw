@@ -47,6 +47,11 @@ MIN_MARKET_CAP = 50
 # 行业黑名单 (历史回测胜率显著低于平均水平的行业)
 INDUSTRY_BLACKLIST = {'医药商业', '生物制药', '化学制药', '中成药'}
 
+# 大盘观察分数阈值 (前5天分数 >= 此值则不开仓)
+MARKET_SCORE_MAX = 2
+MARKET_SCORE_LOOKBACK = 5
+MARKET_SCORE_THRESHOLD = 1.0  # 个股涨幅与大盘涨幅差值超过此值才计分
+
 # 缓存市值数据
 market_cap_cache = {}
 premarket_data = None
@@ -58,6 +63,56 @@ if os.path.exists(_stock_list_path):
     _stock_list_df = pd.read_csv(_stock_list_path)
     _industry_map = dict(zip(_stock_list_df['ts_code'], _stock_list_df['industry']))
     del _stock_list_df
+
+# 加载上证指数日涨跌幅 (用于大盘观察分数)
+_idx_chg_map = {}
+_idx_path = os.path.join(DATA_DIR, 'idx_000001_SH.csv')
+if os.path.exists(_idx_path):
+    _idx_df = pd.read_csv(_idx_path)
+    _idx_df['trade_date'] = _idx_df['trade_date'].astype(str)
+    _idx_chg_map = dict(zip(_idx_df['trade_date'], _idx_df['pct_chg']))
+    del _idx_df
+
+
+def calc_market_score(df: pd.DataFrame, idx: int) -> int:
+    """
+    计算大盘观察分数 v2
+    观察开仓日前N天，个股涨跌幅与上证涨跌幅的差值:
+    - 差值 > +1% → +1分 (显著跑赢大盘)
+    - 差值 < -1% → -1分 (显著跑输大盘)
+    - 差值在 ±1% 之间 → 0分 (噪音区间)
+    
+    分数越高说明前期已经跑赢大盘太多，放量可能是短期见顶。
+    分数 >= MARKET_SCORE_MAX 时不开仓。
+    """
+    if not _idx_chg_map:
+        return 0  # 无上证数据时不过滤
+    
+    score = 0
+    for i in range(1, MARKET_SCORE_LOOKBACK + 1):
+        day_idx = idx - i
+        if day_idx < 1:
+            break
+        
+        today = df.iloc[day_idx]
+        yesterday = df.iloc[day_idx - 1]
+        
+        # 个股涨跌幅
+        stock_pct = (today['close'] - yesterday['close']) / yesterday['close'] * 100
+        
+        # 上证涨跌幅
+        trade_date = str(today['trade_date']).replace('-', '')
+        idx_pct = _idx_chg_map.get(trade_date, None)
+        if idx_pct is None:
+            continue
+        
+        diff = stock_pct - idx_pct
+        if diff > MARKET_SCORE_THRESHOLD:
+            score += 1
+        elif diff < -MARKET_SCORE_THRESHOLD:
+            score -= 1
+    
+    return score
 
 
 def get_premarket_data(trade_date: str = None) -> pd.DataFrame:
@@ -417,8 +472,11 @@ def check_buy_points_all(df: pd.DataFrame) -> list:
         # 两个条件同时满足才过滤
         new_filter = is_broken_5day_low and is_below_yesterday_body
         
+        # 大盘观察分数 (前5天个股vs上证的相对强弱)
+        market_score = calc_market_score(df, i)
+        
         # 检查条件
-        if change_15d < 15 and distance_to_high < 10 and vol_ratio > 1.5 and vol_condition and not new_filter:
+        if change_15d < 15 and distance_to_high < 10 and vol_ratio > 1.5 and vol_condition and not new_filter and market_score < MARKET_SCORE_MAX:
             results.append({
                 'date': today['trade_date'],
                 'close': today['close'],
@@ -430,6 +488,7 @@ def check_buy_points_all(df: pd.DataFrame) -> list:
                 'vol': today['vol'],
                 'vol_avg': vol_20d_avg,
                 'vol_ratio': vol_ratio,
+                'market_score': market_score,
             })
     
     return results
@@ -477,8 +536,11 @@ def check_buy_points(df: pd.DataFrame) -> list:
         # 两个条件同时满足才过滤
         new_filter = is_broken_5day_low and is_below_yesterday_body
         
+        # 大盘观察分数
+        market_score = calc_market_score(df, i)
+        
         # 检查条件
-        if change_15d < 15 and distance_to_high < 10 and vol_ratio > 1.5 and vol_condition and not new_filter:
+        if change_15d < 15 and distance_to_high < 10 and vol_ratio > 1.5 and vol_condition and not new_filter and market_score < MARKET_SCORE_MAX:
             # 分析卖点
             sell_analysis = analyze_buy_point(df, i)
             
@@ -935,7 +997,10 @@ def main():
                 is_below_yesterday_body = today['close'] < yesterday_high
                 new_filter = is_broken_5day_low and is_below_yesterday_body
                 
-                if change_15d < 15 and distance_to_high < 10 and vol_ratio > 1.5 and vol_condition and not new_filter:
+                # 大盘观察分数
+                market_score = calc_market_score(df_stock, last_idx)
+                
+                if change_15d < 15 and distance_to_high < 10 and vol_ratio > 1.5 and vol_condition and not new_filter and market_score < MARKET_SCORE_MAX:
                     # 获取历史胜率等信息
                     buy_points = r.get('buy_points', [])
                     historical_stats = {
